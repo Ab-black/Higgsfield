@@ -11,7 +11,7 @@ if (!credentials) {
   process.exit(1);
 }
 
-if (!credentials.includes(":")) {
+if (!/^[^:]+:.+$/.test(credentials)) {
   console.error("HF_CREDENTIALS must use key-id:key-secret format.");
   process.exit(1);
 }
@@ -19,11 +19,22 @@ if (!credentials.includes(":")) {
 // Credentials are passed directly to the server-side SDK and are never printed.
 config({ credentials });
 
+type JobSetResponse = {
+  status?: string;
+  isCompleted?: boolean;
+  isFailed?: boolean;
+  isNsfw?: boolean;
+  isCanceled?: boolean;
+  isCancelled?: boolean;
+  video?: { url?: string };
+  jobs?: Array<{ results?: { raw?: { url?: string } } }>;
+};
+
 async function main(): Promise<void> {
   console.log("Submitting Seedance 2.5 video generation request...");
 
   try {
-    const result = await higgsfield.subscribe(
+    const response = await higgsfield.subscribe(
       "bytedance/seedance-2.5/text-to-video",
       {
         input: {
@@ -31,28 +42,35 @@ async function main(): Promise<void> {
           duration: 5,
           resolution: "720p",
           aspect_ratio: "16:9",
+          output_format: "mp4",
         },
         withPolling: true,
       },
     );
 
-    if (result.status !== "completed") {
-      const status = String(result.status ?? "unknown").toLowerCase();
-      if (status === "failed") {
-        throw new Error("Higgsfield reported that the generation failed.");
-      }
-      if (status === "canceled" || status === "cancelled") {
-        throw new Error("The Higgsfield generation was canceled.");
-      }
-      if (status === "moderated" || status === "rejected") {
-        throw new Error("The Higgsfield generation was blocked by moderation.");
-      }
-      throw new Error(`Generation did not complete successfully (status: ${status}).`);
+    // The SDK returns a JobSet; its raw media URL is in jobs[0].results.raw.url.
+    const result = response as unknown as JobSetResponse;
+    const status = String(result.status ?? "").toLowerCase();
+
+    if (result.isNsfw || status === "nsfw" || status === "moderated" || status === "rejected") {
+      throw new Error("The request was blocked by Higgsfield moderation.");
     }
 
-    const videoUrl = result.video?.url;
+    if (result.isFailed || status === "failed") {
+      throw new Error("Higgsfield reported that video generation failed.");
+    }
+
+    if (result.isCanceled || result.isCancelled || status === "canceled" || status === "cancelled") {
+      throw new Error("The Higgsfield generation request was canceled.");
+    }
+
+    if (!(result.isCompleted || status === "completed")) {
+      throw new Error(`Generation did not complete successfully (status: ${status || "unknown"}).`);
+    }
+
+    const videoUrl = result.jobs?.[0]?.results?.raw?.url ?? result.video?.url;
     if (typeof videoUrl !== "string" || videoUrl.length === 0) {
-      throw new Error("Generation completed but the response did not contain a video URL.");
+      throw new Error("Generation completed but the SDK response did not contain a video URL.");
     }
 
     console.log("Generation completed successfully.");
